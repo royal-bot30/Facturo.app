@@ -967,11 +967,15 @@ async function saveProfile() {
 }
 
 // ── APP NAV ────────────────────────────────────────────
+// NOUVEAU CODE
 function showApp() {
   document.getElementById('landing').classList.remove('active');
   document.getElementById('app').classList.add('active');
   updateHeader();
   checkTrial();
+  loadProfileForm();
+  initPeriodButtons();  // ← LIGNE NOUVELLE
+  filterByPeriod('month');  // ← LIGNE NOUVELLE (initialise le premier filtre)
   showPage('dashboard');
 
   if (currentUser && currentUser.plan !== 'pro') {
@@ -993,12 +997,321 @@ function checkTrial() {
   }
   const trialEnd = new Date(currentUser.trialEnd);
   const now = new Date();
+  
+// ── RECHERCHE & FILTRAGE FACTURES ─────────────
+function renderInvoiceList(searchText = '', statusFilter = '') {
+  const searchLower = searchText.toLowerCase();
+  let filtered = invoices;
+  
+  // Filtre par période
+  if (periodStart && periodEnd) {
+    filtered = filtered.filter(inv => {
+      const invDate = new Date(inv.date + 'T00:00:00');
+      return invDate >= periodStart && invDate <= periodEnd;
+    });
+  }
+  
+  // Filtre par statut
+  if (statusFilter) {
+    filtered = filtered.filter(inv => inv.status === statusFilter);
+  }
+  
+  // Filtre par recherche
+  if (searchText) {
+    filtered = filtered.filter(inv =>
+      (inv.clientName && inv.clientName.toLowerCase().includes(searchLower)) ||
+      (inv.number && inv.number.toLowerCase().includes(searchLower)) ||
+      (inv.company && inv.company.toLowerCase().includes(searchLower))
+    );
+  }
+  
+  const container = document.getElementById('invoice-list-container');
+  
+  if (filtered.length === 0) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">📭</div>
+        <div class="empty-title">Aucune facture trouvée</div>
+        <div class="empty-sub">Créez votre première facture pour la voir ici</div>
+      </div>
+    `;
+    return;
+  }
+  
+  const html = `
+    <table>
+      <thead>
+        <tr>
+          <th>Numéro</th>
+          <th>Client</th>
+          <th>Montant</th>
+          <th class="col-desktop">Date</th>
+          <th>Statut</th>
+          <th style="text-align:right">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${filtered.map(inv => `
+          <tr data-inv-id="${esc(inv.id)}">
+            <td><strong>${esc(inv.number || '—')}</strong></td>
+            <td>${esc(inv.clientName || '—')}</td>
+            <td>${fmt(inv.total || 0)} ${esc(inv.currency || 'FCFA')}</td>
+            <td class="col-desktop">${fmtDate(inv.date)}</td>
+            <td>
+              <span class="status-badge status-${inv.status === 'paid' ? 'paid' : 'unpaid'}">
+                ${inv.status === 'paid' ? '✓ Payée' : '⏳ Impayée'}
+              </span>
+            </td>
+            <td style="text-align:right">
+              <div class="row-actions">
+                <button class="icon-btn" title="Éditer" onclick="editInvoice('${esc(inv.id)}')">✏️</button>
+                <button class="icon-btn" title="Télécharger" onclick="downloadSavedInvoice('${esc(inv.id)}')">⬇️</button>
+                <button class="icon-btn danger" title="Supprimer" onclick="deleteInvoice('${esc(inv.id)}')">🗑️</button>
+              </div>
+            </td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+  
+  container.innerHTML = html;
+}
+
+function initSearchAndFilter() {
+  const searchInput = document.getElementById('invoice-search');
+  const filterSelect = document.getElementById('invoice-filter');
+  
+  if (searchInput) {
+    searchInput.addEventListener('input', (e) => {
+      const status = filterSelect.value;
+      renderInvoiceList(e.target.value, status);
+    });
+  }
+  
+  if (filterSelect) {
+    filterSelect.addEventListener('change', (e) => {
+      const search = searchInput.value;
+      renderInvoiceList(search, e.target.value);
+    });
+  }
+}
+ 
+// ── ACTIONS FACTURES ──────────────────────────
+function editInvoice(invoiceId) {
+  const invoice = invoices.find(inv => inv.id === invoiceId);
+  if (!invoice) {
+    showNotif('Facture non trouvée', 'error');
+    return;
+  }
+  
+  editingInvoiceId = invoiceId;
+  
+  // Remplit le formulaire
+  document.getElementById('from-company').value = invoice.company || '';
+  document.getElementById('from-phone').value = invoice.phone || '';
+  document.getElementById('from-email').value = invoice.email || '';
+  document.getElementById('from-address').value = invoice.address || '';
+  document.getElementById('from-rccm').value = invoice.rccm || '';
+  
+  document.getElementById('to-name').value = invoice.clientName || '';
+  document.getElementById('to-phone').value = invoice.clientPhone || '';
+  document.getElementById('to-email').value = invoice.clientEmail || '';
+  document.getElementById('to-address').value = invoice.clientAddress || '';
+  
+  document.getElementById('inv-number').value = invoice.number || '';
+  document.getElementById('inv-date').value = invoice.date || '';
+  document.getElementById('inv-due').value = invoice.due || '';
+  document.getElementById('inv-currency').value = invoice.currency || 'FCFA';
+  document.getElementById('inv-notes').value = invoice.notes || '';
+  
+  // Charge les articles
+  items = invoice.items || [{ desc: '', qty: 1, lineTotal: 0 }];
+  renderItems();
+  
+  // Charge le logo
+  logoDataUrl = invoice.logo || null;
+  if (logoDataUrl) {
+    document.getElementById('logo-preview-small').src = logoDataUrl;
+    document.getElementById('logo-preview-small').style.display = 'block';
+    document.getElementById('logo-placeholder').style.display = 'none';
+  }
+  
+  // Change le titre du builder
+  document.getElementById('builder-title').textContent = 'Éditer la facture';
+  document.getElementById('btn-save').textContent = '💾 Mettre à jour';
+  
+  // Affiche la page builder
+  showPage('builder');
+  updatePreview();
+  showNotif('Facture chargée pour édition', 'success');
+}
+
+function downloadSavedInvoice(invoiceId) {
+  const invoice = invoices.find(inv => inv.id === invoiceId);
+  if (!invoice) {
+    showNotif('Facture non trouvée', 'error');
+    return;
+  }
+  
+  // Charge les données et télécharge
+  document.getElementById('from-company').value = invoice.company || '';
+  document.getElementById('inv-number').value = invoice.number || '';
+  items = invoice.items || [];
+  updatePreview();
+  
+  setTimeout(() => {
+    downloadPDF();
+  }, 300);
+}
+
+function deleteInvoice(invoiceId) {
+  if (!confirm('Êtes-vous sûr de vouloir supprimer cette facture ?')) return;
+  
+  const index = invoices.findIndex(inv => inv.id === invoiceId);
+  if (index === -1) {
+    showNotif('Facture non trouvée', 'error');
+    return;
+  }
+  
+  // Supprime de Firestore
+  deleteDoc(doc(db, 'invoices', invoiceId))
+    .then(() => {
+      invoices.splice(index, 1);
+      renderInvoiceList();
+      showNotif('Facture supprimée ✓', 'success');
+    })
+    .catch(e => {
+      showNotif('Erreur suppression : ' + e.message, 'error');
+    });
+}
   if (trialEnd < now) {
     showBlockScreen();
   }
 }
+// ── PÉRIODE & FILTRAGE ─────────────────────────
+let currentPeriod = 'month';
+let periodStart = null;
+let periodEnd = null;
 
-function showBlockScreen() {
+function calculatePeriodDates(period) {
+  const now = new Date();
+  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+  const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+  
+  switch(period) {
+    case 'month':
+      return { start: startOfMonth, end: endOfMonth };
+    case 'last':
+      const lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      return { start: lastMonth, end: startOfMonth };
+    case '3months':
+      const start3 = new Date(now.getFullYear(), now.getMonth() - 3, 1);
+      return { start: start3, end: endOfMonth };
+    case '6months':
+      const start6 = new Date(now.getFullYear(), now.getMonth() - 6, 1);
+      return { start: start6, end: endOfMonth };
+    case 'year':
+      const startYear = new Date(now.getFullYear(), 0, 1);
+      return { start: startYear, end: endOfMonth };
+    case 'all':
+      return { start: new Date(2000, 0, 1), end: endOfMonth };
+    case 'custom':
+      const customStart = val('custom-start');
+      const customEnd = val('custom-end');
+      if (!customStart || !customEnd) {
+        showNotif('Remplissez les deux dates', 'error');
+        return null;
+      }
+      return { 
+        start: new Date(customStart + 'T00:00:00'), 
+        end: new Date(customEnd + 'T00:00:00') 
+      };
+    default:
+      return { start: startOfMonth, end: endOfMonth };
+  }
+}
+
+function filterByPeriod(period) {
+  currentPeriod = period;
+  const dates = calculatePeriodDates(period);
+  if (!dates) return;
+  
+  periodStart = dates.start;
+  periodEnd = dates.end;
+  
+  // Met à jour tous les boutons
+  document.querySelectorAll('.period-btn').forEach(btn => {
+    btn.classList.remove('active');
+    if (btn.dataset.period === period) btn.classList.add('active');
+  });
+  
+  // Affiche/cache le formulaire personnalisé
+  const customRange = document.getElementById('custom-range');
+  if (period === 'custom') {
+    customRange.classList.add('show');
+  } else {
+    customRange.classList.remove('show');
+  }
+  
+  // Recharge tout
+  updateDashboardStats();
+  renderInvoiceList();
+  updateRevenueChart();
+}
+
+function updateDashboardStats() {
+  if (!periodStart || !periodEnd) {
+    filterByPeriod('month');
+    return;
+  }
+  
+  // Filtre les factures par période
+  const filtered = invoices.filter(inv => {
+    const invDate = new Date(inv.date + 'T00:00:00');
+    return invDate >= periodStart && invDate <= periodEnd;
+  });
+  
+  // Calcule les stats
+  const revenue = filtered.reduce((sum, inv) => sum + (inv.total || 0), 0);
+  const paid = filtered.filter(inv => inv.status === 'paid').length;
+  const unpaid = filtered.filter(inv => inv.status === 'unpaid').length;
+  
+  document.getElementById('stat-revenue').textContent = fmt(revenue);
+  document.getElementById('stat-total').textContent = filtered.length;
+  document.getElementById('stat-paid').textContent = paid;
+  document.getElementById('stat-pending').textContent = unpaid;
+  
+  // Met à jour le label de la période
+  const periods = {
+    'month': 'ce mois-ci',
+    'last': 'mois dernier',
+    '3months': 'les 3 derniers mois',
+    '6months': 'les 6 derniers mois',
+    'year': 'cette année',
+    'all': 'tous les temps',
+    'custom': 'période personnalisée'
+  };
+  document.getElementById('chart-period-label').textContent = periods[currentPeriod] || 'ce mois-ci';
+}
+
+// ── EVENT LISTENERS POUR LES BOUTONS PÉRIODE ──
+function initPeriodButtons() {
+  document.querySelectorAll('.period-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      filterByPeriod(btn.dataset.period);
+    });
+  });
+  
+  const applyBtn = document.getElementById('btn-apply-custom');
+  if (applyBtn) {
+    applyBtn.addEventListener('click', () => {
+      filterByPeriod('custom');
+    });
+  }
+}
+
+  function showBlockScreen() {
   const LIEN_FEDAPAY_BASE = 'https://pay.fedapay.com/VOTRE_LIEN_FEDAPAY';
   const uid = currentUser.uid;
   const email = encodeURIComponent(currentUser.email);
